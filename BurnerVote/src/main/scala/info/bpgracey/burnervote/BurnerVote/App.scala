@@ -20,6 +20,16 @@ import akka.http.scaladsl.Http.ServerBinding
 import akka.http.scaladsl.Http
 import scala.io.StdIn
 import akka.http.scaladsl.model.headers.HttpCredentials
+import akka.event.Logging
+import akka.event.Logging.LogLevel
+import akka.http.scaladsl.server.Route
+import akka.stream.Materializer
+import scala.concurrent.ExecutionContext
+import akka.event.LoggingAdapter
+import akka.http.scaladsl.server.RouteResult.Complete
+import akka.http.scaladsl.server.directives.LogEntry
+import akka.http.scaladsl.server.directives.DebuggingDirectives
+import akka.http.scaladsl.server.directives.LoggingMagnet
 
 
 
@@ -104,15 +114,40 @@ object WebServer extends App with JsonService {
   implicit val materializer = ActorMaterializer()
   implicit val executionContext = system.dispatcher
   
-  val bindingFuture: Future[ServerBinding] = Http().bindAndHandle(route, "localhost", 8080)
+  val log = Logging(system, this.getClass)
+  val loggedRoute = requestMethodAndResponseStatusAsInfo(Logging.InfoLevel, route)
+  val bindingFuture: Future[ServerBinding] = Http().bindAndHandle(loggedRoute, "localhost", 8080)
   
-  println("Running...")
+  log.info("Running...")
   StdIn.readLine() // user pressed return
   stop()
   
   def stop(): String = {
     bindingFuture.flatMap(_.unbind()).onComplete(_ => system.terminate())
-    println("Stopped!")
+    log.info("Stopped!")
     "Stopped"
+  }
+  
+  def requestMethodAndResponseStatusAsInfo(level: LogLevel, route: Route)
+                                          (implicit m: Materializer, ex: ExecutionContext) = {
+
+    def akkaResponseTimeLoggingFunction(loggingAdapter: LoggingAdapter, requestTimestamp: Long)(req: HttpRequest)(res: Any): Unit = {
+      val entry = res match {
+        case Complete(resp) =>
+          val responseTimestamp: Long = System.currentTimeMillis()
+          val elapsedTime: Long = responseTimestamp - requestTimestamp
+          val loggingString = "Logged Request:" + req.method + ":" + req.uri + ":" + resp.status + ":" + elapsedTime
+          LogEntry(loggingString, level)
+        case anythingElse =>
+          LogEntry(s"$anythingElse", level)
+      }
+      entry.logTo(loggingAdapter)
+    }
+    
+    DebuggingDirectives.logRequestResult(LoggingMagnet(log => {
+      val requestTimestamp = System.currentTimeMillis()
+      akkaResponseTimeLoggingFunction(log, requestTimestamp)
+    }))(route)
+
   }
 }
