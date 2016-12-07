@@ -13,6 +13,11 @@ import akka.http.scaladsl.server.Directives
 import akka.http.scaladsl.server.RouteResult.route2HandlerFlow
 import akka.stream.ActorMaterializer
 import spray.json.DefaultJsonProtocol
+import spray.json.RootJsonFormat
+import spray.json.JsObject
+import spray.json.JsString
+import spray.json.JsValue
+import spray.json.DeserializationException
 
 /**
  * @author Bancroft Gracey
@@ -23,7 +28,24 @@ case class BurnerVoteCount(image: String, votes: Int)
 case class BurnerVotes(votes: List[BurnerVoteCount])
 
 trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
-  implicit val burnerMessageFormat = jsonFormat6(BurnerMessage)
+  implicit object BurnerMessageFormat extends RootJsonFormat[BurnerMessage] {
+    def write(msg: BurnerMessage) = JsObject(
+        "type" -> JsString(msg.msgType),
+        "payload" -> JsString(msg.payload),
+        "fromNumber" -> JsString(msg.fromNumber),
+        "toNumber" -> JsString(msg.toNumber),
+        "userId" -> JsString(msg.userid),
+        "burnerId" -> JsString(msg.burnerId)
+    )
+    
+    def read(value: JsValue) = {
+      value.asJsObject.getFields("type", "payload", "fromNumber", "toNumber", "userId", "burnerId") match {
+        case Seq(JsString(msgType), JsString(payload), JsString(fromNumber), JsString(toNumber), JsString(userId), JsString(burnerId)) =>
+          BurnerMessage(msgType, payload, fromNumber, toNumber, userId, burnerId)
+        case _ => throw DeserializationException("Burner message expected")
+      }
+    }
+  }
   implicit val burnerVoteCountFormat = jsonFormat2(BurnerVoteCount)
   implicit val burnerVotesFormat = jsonFormat1(BurnerVotes)
 }
