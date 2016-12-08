@@ -30,6 +30,9 @@ import akka.http.scaladsl.server.RouteResult.Complete
 import akka.http.scaladsl.server.directives.LogEntry
 import akka.http.scaladsl.server.directives.DebuggingDirectives
 import akka.http.scaladsl.server.directives.LoggingMagnet
+import akka.http.scaladsl.model.StatusCodes
+import akka.pattern.ask
+import akka.util.Timeout
 
 
 
@@ -39,7 +42,7 @@ import akka.http.scaladsl.server.directives.LoggingMagnet
 
 case class BurnerMessage(msgType: String, payload: String, fromNumber: String, toNumber: String, userid: String, burnerId: String)
 case class BurnerVoteCount(image: String, votes: Int)
-case class BurnerVotes(votes: List[BurnerVoteCount])
+case class BurnerVotes(votes: Seq[BurnerVoteCount])
 
 trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
   implicit object BurnerMessageFormat extends RootJsonFormat[BurnerMessage] {
@@ -64,25 +67,18 @@ trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
   implicit val burnerVotesFormat = jsonFormat1(BurnerVotes)
 }
 
-object DropBoxDAO {
-  val TOKEN = "mHbYdNuD7bAAAAAAAAAACtKr8D3ehwbF_w_GVa86Dy0Uxv-vWEWcCGQYUd7__df5"
-  val uri = "";
-  val token = OAuth2BearerToken(TOKEN)
-  
-  val request = HttpRequest(
-      method = HttpMethods.POST,
-      headers = List(Authorization(token.asInstanceOf[HttpCredentials]))
-  )
-}
-
 trait JsonService extends Directives with JsonSupport {
+  import AkkaSystem._
+  import VotingActor._
   val route =
     post {
       path("event") {
         entity(as[BurnerMessage]) { message =>
           message match {
-            case BurnerMessage("inboundMedia", mediaUrl, _, _, _, _) => 
+            case BurnerMessage("inboundMedia", mediaUrl, _, _, _, _) =>
+              votingActor ! SaveFile(mediaUrl)
             case BurnerMessage("inboundText", fileName, _, _, _, _) =>
+              votingActor ! Vote(fileName)
           }
           val typ = message.msgType
           val pay = message.payload
@@ -92,8 +88,7 @@ trait JsonService extends Directives with JsonSupport {
     } ~
     get {
       path("report") {
-        val votes = BurnerVotes(List(BurnerVoteCount("cat.jpg", 1), BurnerVoteCount("kittens.png", 123)))
-        complete(votes.votes)
+        complete(VotingActor.result.votes)
       }
     } ~
     get {
@@ -109,10 +104,20 @@ trait JsonService extends Directives with JsonSupport {
     }
 }
 
-object WebServer extends App with JsonService {
+object AkkaSystem {
   implicit val system = ActorSystem("burner-system")
   implicit val materializer = ActorMaterializer()
   implicit val executionContext = system.dispatcher
+  
+  import scala.concurrent.duration._
+  implicit val timeout = Timeout(5 seconds)
+  
+  // just 1 actor for now...
+  val votingActor = system.actorOf(VotingActor.props, "Booth")
+}
+
+object WebServer extends App with JsonService {
+  import AkkaSystem._
   
   val log = Logging(system, this.getClass)
   val loggedRoute = requestMethodAndResponseStatusAsInfo(Logging.InfoLevel, route)
