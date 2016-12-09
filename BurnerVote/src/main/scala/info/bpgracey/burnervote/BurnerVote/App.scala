@@ -1,38 +1,36 @@
 package info.bpgracey.burnervote.BurnerVote
 
+import scala.concurrent.ExecutionContext
+import scala.concurrent.Future
+import scala.io.StdIn
+
+import akka.actor.ActorSystem
+import akka.event.Logging
+import akka.event.Logging.LogLevel
+import akka.event.LoggingAdapter
+import akka.http.scaladsl.Http
+import akka.http.scaladsl.Http.ServerBinding
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
+import akka.http.scaladsl.model.HttpRequest
+import akka.http.scaladsl.model.Uri
+import akka.http.scaladsl.model.headers.HttpCredentials
+import akka.http.scaladsl.server.Directives
+import akka.http.scaladsl.server.directives.LoggingMagnet
+import akka.http.scaladsl.server.directives.DebuggingDirectives
+import akka.http.scaladsl.server.Route
+import akka.http.scaladsl.server.RouteResult.Complete
+import akka.http.scaladsl.server.directives.LogEntry
+import akka.pattern.ask
+import akka.stream.ActorMaterializer
+import akka.stream.Materializer
+import akka.util.Timeout
+import com.typesafe.config.ConfigFactory
 import spray.json.DefaultJsonProtocol
-import spray.json.RootJsonFormat
+import spray.json.DeserializationException
 import spray.json.JsObject
 import spray.json.JsString
 import spray.json.JsValue
-import spray.json.DeserializationException
-import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
-import akka.http.scaladsl.model.HttpRequest
-import akka.http.scaladsl.model.Uri
-import akka.http.scaladsl.model.headers.OAuth2BearerToken
-import akka.http.scaladsl.model.headers.Authorization
-import akka.http.scaladsl.model.HttpMethods
-import akka.http.scaladsl.server.Directives
-import scala.concurrent.Future
-import akka.http.scaladsl.Http.ServerBinding
-import akka.http.scaladsl.Http
-import scala.io.StdIn
-import akka.http.scaladsl.model.headers.HttpCredentials
-import akka.event.Logging
-import akka.event.Logging.LogLevel
-import akka.http.scaladsl.server.Route
-import akka.stream.Materializer
-import scala.concurrent.ExecutionContext
-import akka.event.LoggingAdapter
-import akka.http.scaladsl.server.RouteResult.Complete
-import akka.http.scaladsl.server.directives.LogEntry
-import akka.http.scaladsl.server.directives.DebuggingDirectives
-import akka.http.scaladsl.server.directives.LoggingMagnet
-import akka.http.scaladsl.model.StatusCodes
-import akka.pattern.ask
-import akka.util.Timeout
+import spray.json.RootJsonFormat
 
 
 
@@ -68,7 +66,6 @@ trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
 }
 
 trait JsonService extends Directives with JsonSupport {
-  import AkkaSystem._
   import VotingActor._
   val route =
     post {
@@ -76,9 +73,9 @@ trait JsonService extends Directives with JsonSupport {
         entity(as[BurnerMessage]) { message =>
           message match {
             case BurnerMessage("inboundMedia", mediaUrl, _, _, _, _) =>
-              votingActor ! SaveFile(mediaUrl)
+              BurnerService.saveFile(mediaUrl)
             case BurnerMessage("inboundText", fileName, _, _, _, _) =>
-              votingActor ! Vote(fileName)
+              BurnerService.vote(fileName)
           }
           val typ = message.msgType
           val pay = message.payload
@@ -101,7 +98,30 @@ trait JsonService extends Directives with JsonSupport {
         WebServer.stop()
         complete(WebServer.stop())
       }
+    } ~
+    // dropbox webhook - respond to challenge, process updates to file list
+    get {
+      path("webhook") {
+        parameters('challenge) { challenge =>
+          complete(challenge)
+        }
+      }
+    } ~
+    post {
+      path("webhook") {
+        BurnerService.continue
+        complete("")
+      }
     }
+}
+
+object Settings {
+  val conf = ConfigFactory.load().getConfig("burnervote")
+  val HOST = conf.getString("http.host")
+  val PORT = conf.getInt("http.port")
+  val DBPATH = conf.getString("dropbox.path")
+  val DBTOKEN = conf.getString("dropbox.token")
+  if (DBTOKEN isEmpty) throw new Exception("Config - token missing")
 }
 
 object AkkaSystem {
@@ -112,8 +132,21 @@ object AkkaSystem {
   import scala.concurrent.duration._
   implicit val timeout = Timeout(5 seconds)
   
+}
+
+object BurnerService {
+  import AkkaSystem._
+
   // just 1 actor for now...
   val votingActor = system.actorOf(VotingActor.props, "Booth")
+  
+  def update: Unit = votingActor ! VotingActor.Update
+  
+  def continue: Unit = votingActor ! VotingActor.Continue
+  
+  def saveFile(mediaUrl: String): Unit = votingActor ! VotingActor.SaveFile(mediaUrl)
+  
+  def vote(fileName: String): Unit = votingActor ! VotingActor.Vote(fileName)
 }
 
 object WebServer extends App with JsonService {
@@ -121,7 +154,12 @@ object WebServer extends App with JsonService {
   
   val log = Logging(system, this.getClass)
   val loggedRoute = requestMethodAndResponseStatusAsInfo(Logging.InfoLevel, route)
-  val bindingFuture: Future[ServerBinding] = Http().bindAndHandle(loggedRoute, "localhost", 8080)
+  val host = Settings.HOST
+  val port = Settings.PORT
+  log.info("Binding to {}:{}", host, port)
+  val bindingFuture: Future[ServerBinding] = Http().bindAndHandle(loggedRoute, host, port)
+  
+  BurnerService.update
   
   log.info("Running...")
   StdIn.readLine() // user pressed return
